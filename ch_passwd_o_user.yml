@@ -1,38 +1,21 @@
 ---
-- name: "Actualizar Clave de Usuario {{ user_name }} En Sistemas Unix"
+- name: "Actualizar Clave de Usuario {{ user_name }}"
   hosts: all
-  gather_facts: false
+  gather_facts: yes
   gather_timeout: 15
+  ignore_unreachable: yes
   vars:
-    enviarmail: "Si"
+    enviarmail: "No"
     nueva_password:
     email_host: "172.22.88.6"
     email_from: "edduin.arias.Ext@claro.com.co"
-    email_to: "{{ email_user | default(ansible_env.MAIL, true) | default('edduin.arias.Ext@claro.com.co', true) }}"
+    email_to: "{{ email_user }}"
     email_subject: "Cambio de Clave en LineaBase"
     email_port: 25
     new_password_hash: "{{ nueva_password | password_hash('sha512', 'S4ltHpuX99') }}"
 
-  pre_tasks:
-    - name: "Validar que se haya definido --limit"
-      ansible.builtin.fail:
-        msg: "ERROR: Debes usar --limit para especificar un grupo o host objetivo. Evitando ejecución sobre todos los hosts."
-      when: ansible_play_batch | length == groups['all'] | length
-      run_once: true
-  
-    - name: "Validar que nueva_password no esté vacía"
-      ansible.builtin.fail:
-        msg: "La variable nueva_password no puede estar vacía"
-      when: nueva_password is not defined or nueva_password == ""
-      run_once: true
-
-  
   tasks:
-    - name: "Obtener solo os_family"
-      ansible.builtin.setup:
-        filter: ansible_os_family
-      register: os_facts
-      
+
     - name: "Verificar si el usuario existe en el host remoto"
       ansible.builtin.command: "id {{ user_name }}"
       register: usuario_existe
@@ -43,17 +26,17 @@
       ansible.builtin.fail:
         msg: "La variable nueva_password no puede estar vacía"
       when: nueva_password is not defined or nueva_password == ""
-      run_once: true
 
     # ================== HP-UX ==================
     - name: Cambiando Password usuarios en HP-UX
-      ansible.builtin.raw: "/usr/sbin/usermod -p '{{ new_password_hash }}' {{ user_name }}"
+      ansible.builtin.raw: |
+        /usr/sbin/usermod -p '{{ new_password_hash }}' {{ user_name }}
       when:
-        - os_facts.ansible_facts['ansible_os_family'] == 'HP-UX'
+        - ansible_facts['os_family'] == 'HP-UX'
         - usuario_existe.rc == 0        
       register: estado_cambio_hpux
       ignore_errors: yes
-      failed_when: false
+    
 
     # ================== Linux ==================
     - name: "Cambiar contraseña de usuario en sistemas Linux"
@@ -63,50 +46,53 @@
         update_password: always
       register: estado_cambio_linux
       when:
+        - user_name is defined
         - usuario_existe.rc == 0
-        - os_facts.ansible_facts['ansible_os_family'] in ['RedHat', 'Debian', 'Suse', 'AlmaLinux']
-      ignore_errors: yes
-      failed_when: false
+        - ansible_facts['os_family'] in ['RedHat', 'Debian', 'Suse', 'AlmaLinux']
 
     - name: "Desbloquear cuenta en Linux"
       ansible.builtin.command: "passwd -u {{ user_name }}"
       when:
+        - user_name is defined
         - usuario_existe.rc == 0
-        - os_facts.ansible_facts['ansible_os_family'] in ['RedHat', 'Debian', 'Suse', 'AlmaLinux']
+        - ansible_facts['os_family'] in ['RedHat', 'Debian', 'Suse', 'AlmaLinux']
       ignore_errors: yes
-      failed_when: false
 
     - name: "Resetear intentos fallidos faillock"
       ansible.builtin.command: "faillock --user {{ user_name }} --reset"
-      when: 
-        - os_facts.ansible_facts['ansible_os_family'] in ['RedHat', 'Debian', 'Suse', 'AlmaLinux']
       ignore_errors: yes
       failed_when: false
+      when: 
+        - ansible_facts['os_family'] in ['RedHat', 'Debian', 'Suse', 'AlmaLinux']
 
     - name: "Resetear intentos fallidos pam_tally"
       ansible.builtin.command: "pam_tally2 --user={{ user_name }} --reset"
-      when: 
-        - os_facts.ansible_facts['ansible_os_family'] in ['RedHat', 'Debian', 'Suse', 'AlmaLinux']
       ignore_errors: yes
       failed_when: false
+      when: 
+        - ansible_facts['os_family'] in ['RedHat', 'Debian', 'Suse', 'AlmaLinux']
 
-    # ================== AIX ==================
+    # ============================================================
+    # [AIX] Instalar pexpect y cambiar contraseña
+    # ============================================================
+    
     - name: "[AIX] Verificar si pexpect está instalado"
       ansible.builtin.shell: |
         /opt/freeware/bin/python3.7 -m pip show pexpect >/dev/null 2>&1
       register: pexpect_check
       failed_when: false
       changed_when: false
-      when: os_facts.ansible_facts['ansible_os_family'] == 'AIX'
+      when: ansible_facts['os_family'] == 'AIX'
     
     - name: "[AIX] Instalar pexpect (si falta)"
       ansible.builtin.shell: |
+        /opt/freeware/bin/python3.7 -m pip show pexpect >/dev/null 2>&1 || \
         /opt/freeware/bin/python3.7 -m pip install pexpect --quiet
-      when: os_facts.ansible_facts['ansible_os_family'] == 'AIX' and pexpect_check.rc != 0
+      when: ansible_facts['os_family'] == 'AIX'
       ignore_errors: yes
-      failed_when: false
+      register: pexpect_instalacion
     
-    - name: "[AIX] Cambiar contraseña de usuario usando expect (async)"
+    - name: "[AIX] Cambiar contraseña de usuario usando expect"
       ansible.builtin.expect:
         command: "passwd {{ user_name }}"
         responses:
@@ -114,36 +100,33 @@
           "(?i)re-enter": "{{ nueva_password }}"
           "(?i)enter the new password again": "{{ nueva_password }}"
           "(?i)enter new password": "{{ nueva_password }}"
-          ".*": ""
         timeout: 60
       register: estado_cambio_aix
       when:
-        - os_facts.ansible_facts['ansible_os_family'] == 'AIX'
+        - ansible_facts['os_family'] == 'AIX'
         - usuario_existe.rc == 0
-      async: 70
-      poll: 0
       ignore_errors: yes
-      failed_when: false
-
 
     - name: "[AIX] Quitar flag de cambio forzado de contraseña"
       ansible.builtin.command: "pwdadm -c {{ user_name }}"
       when:
-        - os_facts.ansible_facts['ansible_os_family'] == 'AIX'
+        - ansible_facts['os_family'] == 'AIX'
         - usuario_existe.rc == 0
       ignore_errors: yes
-      failed_when: false
+      register: aix_clear_pwdadm
 
-    # ================== Solaris ==================
+    # ============================================================
+    # [Solaris] Cambio de contraseña
+    # ============================================================
+    
     - name: "[Solaris] Generar hash SHA-256 compatible (en nodo remoto)"
       ansible.builtin.shell: |
         python3 -c 'import crypt; print(crypt.crypt("{{ nueva_password }}", crypt.mksalt(crypt.METHOD_SHA256)))'
       register: pass_hash
       when:
         - usuario_existe.rc == 0
-        - os_facts.ansible_facts['ansible_os_family'] == 'Solaris'
+        - ansible_facts['os_family'] == 'Solaris'
       changed_when: false
-      failed_when: false
     
     - name: "[Solaris] Actualizar campo de contraseña en /etc/shadow"
       ansible.builtin.replace:
@@ -153,48 +136,44 @@
         backup: yes
       register: estado_cambio_solaris
       when:
-        - os_facts.ansible_facts['ansible_os_family'] == 'Solaris'
+        - ansible_facts['os_family'] == 'Solaris'
         - usuario_existe.rc == 0
-      ignore_errors: yes
-      failed_when: false
 
-    # ================== Registro de resultados ==================
+
+    # ================== Resultado ==================
     - name: "Registrar resultados del cambio de contraseña"
-      set_fact:
+      ansible.builtin.set_fact:
         cambio_resultado:
           host: "{{ inventory_hostname }}"
           usuario: "{{ user_name }}"
           estado: >-
-            {% if usuario_existe.rc != 0 %}
+            {% if usuario_existe.rc is defined and usuario_existe.rc != 0 %}
               Falló
-            {% elif os_facts.ansible_facts['ansible_os_family'] in ['RedHat','Debian','Suse','AlmaLinux'] and estado_cambio_linux is defined and estado_cambio_linux.failed | default(false) == false %}
+            {% elif (estado_cambio_linux is defined and estado_cambio_linux.changed | default(false)) %}
               Éxito
-            {% elif os_facts.ansible_facts['ansible_os_family'] == 'HP-UX' and estado_cambio_hpux is defined and estado_cambio_hpux.rc == 0 %}
+            {% elif (estado_cambio_hpux is defined and estado_cambio_hpux.rc | default(1) == 0) %}
               Éxito
-            {% elif os_facts.ansible_facts['ansible_os_family'] == 'AIX' and estado_final_aix is defined and estado_final_aix.rc == 0 %}
+            {% elif (estado_cambio_aix is defined and estado_cambio_aix.rc | default(1) == 0) %}
               Éxito
-            {% elif os_facts.ansible_facts['ansible_os_family'] == 'Solaris' and estado_cambio_solaris is defined and estado_cambio_solaris.changed | default(false) %}
+            {% elif (estado_cambio_solaris is defined and estado_cambio_solaris.changed | default(false)) %}
               Éxito
             {% else %}
               Falló
             {% endif %}
-          detalle: >-
-            {% if usuario_existe.rc != 0 %}
-              Usuario no existe
-            {% elif os_facts.ansible_facts['ansible_os_family'] in ['RedHat','Debian','Suse','AlmaLinux'] and estado_cambio_linux is defined and estado_cambio_linux.failed | default(false) %}
-              {{ estado_cambio_linux.msg | default('Error Linux') }}
-            {% elif os_facts.ansible_facts['ansible_os_family'] == 'HP-UX' and estado_cambio_hpux is defined and estado_cambio_hpux.rc != 0 %}
-              {{ estado_cambio_hpux.stderr | default('Error HP-UX') }}
-            {% elif os_facts.ansible_facts['ansible_os_family'] == 'AIX' and estado_final_aix is defined and estado_final_aix.rc != 0 %}
-              {{ estado_final_aix.stderr | default('Error AIX') }}
-            {% elif os_facts.ansible_facts['ansible_os_family'] == 'Solaris' and estado_cambio_solaris is defined and estado_cambio_solaris.changed | default(false) == false %}
-              Error Solaris
+          error: >-
+            {% if usuario_existe.rc is defined and usuario_existe.rc != 0 %}
+              {{ usuario_existe.stderr | default('') }}
+            {% elif estado_cambio_hpux is defined %}
+              {{ estado_cambio_hpux.stderr | default('') }}
+            {% elif estado_cambio_linux is defined %}
+              {{ estado_cambio_linux.stderr | default('') }}
+            {% elif estado_cambio_aix is defined %}
+              {{ estado_cambio_aix.stderr | default('') }}
+            {% elif estado_cambio_solaris is defined %}
+              {{ estado_cambio_solaris.stderr | default('') }}
             {% else %}
-              -
             {% endif %}
       when: user_name is defined
-
-
 
     - name: Enviar correo del Reporte
       become: false
@@ -206,7 +185,7 @@
         body: "{{ lookup('template', 'email_template.j2') }}"   
         from: "{{ email_from }}"
         to: "{{ email_to }}"
+        #cc: "{{ email_cc }}"
       delegate_to: localhost
       run_once: yes
       when: enviarmail == 'Si'
-      ignore_errors: yes
